@@ -41,6 +41,15 @@ class StabilityCfg:
 @dataclass(frozen=True)
 class SmoothCfg:
     pos_alpha: float = 0.25  # temporal EMA
+    speed_alpha: float = 0.15  # EMA for speed smoothing (lower = smoother)
+    speed_max_kmh_rate: float = 4.0  # max visual speed change rate (km/h per second)
+    speed_quantum_kmh: float = 0.5   # round displayed speed to this step (km/h)
+
+@dataclass(frozen=True)
+class AlgoCfg:
+    predictor: str = "weighted_barycenter"  # future: particle_filter, kalman, etc.
+    smoother: str = "kalman"
+    speed: str = "displacement"  # base method; speed is additionally smoothed via SmoothCfg.speed_alpha
 
 @dataclass(frozen=True)
 class AppCfg:
@@ -50,3 +59,4 @@ class AppCfg:
     hud: HudCfg = HudCfg()
     stability: StabilityCfg = StabilityCfg()
     smooth: SmoothCfg = SmoothCfg()
+    algo: AlgoCfg = AlgoCfg()

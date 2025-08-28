@@ -9,10 +9,11 @@ from tiles import CachedHttpTileProvider
 from hud import HudRenderer
 from detector.yolo_ultra import YoloUltranyxDetector
 from stability import StabilityGate
-from estimator import PositionEstimator
+from estimator import PositionEstimator, WeightedBarycenterPredictor, EmaPositionSmoother, DisplacementSpeedEstimator, KalmanCvSmoother
 from dedup import deduplicate_by_class
 from video_io import Cv2VideoWriter
 from geo import haversine_m
+import traceback
 
 def overlay_bottom_right(frame, overlay_img, pad=12):
     H, W = frame.shape[:2]
@@ -87,7 +88,18 @@ def main():
         lock_thresh=cfg.stability.lock_thresh,
         unlock_thresh=cfg.stability.unlock_thresh,
     )
-    est = PositionEstimator(lat0, lon0, pos_alpha=cfg.smooth.pos_alpha)
+    # --- Estimator (Strategy-based) ---
+    predictor = WeightedBarycenterPredictor(lat0, lon0)
+    if cfg.algo.smoother == "kalman":
+        smoother = KalmanCvSmoother(lat0, lon0)
+        # when using Kalman, speed can be derived from the filter's velocity later; keep displacement but smooth it
+        speed_est = DisplacementSpeedEstimator(speed_alpha=cfg.smooth.speed_alpha)
+        print("[INFO] Smoother: Kalman (CV)")
+    else:
+        smoother = EmaPositionSmoother(alpha=cfg.smooth.pos_alpha)
+        speed_est = DisplacementSpeedEstimator(speed_alpha=cfg.smooth.speed_alpha)
+        print("[INFO] Smoother: EMA")
+    est = PositionEstimator(predictor, smoother, speed_est)
 
     # --- Video Output (initialized on first frame to avoid double-reading for size) ---
     wtr = None
@@ -95,6 +107,9 @@ def main():
     print(f"[INFO] Target FPS (from SRT): {fps:.2f}")
 
     path_pred: List[LatLon] = []
+    spd_gt_state = 0.0  # EMA for SRT speed (m/s)
+    vis_spd_kmh = 0.0   # visualized algo speed (km/h) after slew + quantize
+    vis_spd_gt_kmh = 0.0  # visualized SRT speed (km/h) after slew + quantize
     frame_idx = 0
 
     try:
@@ -107,6 +122,10 @@ def main():
                 H, W = frame.shape[:2]
                 wtr = Cv2VideoWriter(cfg.video.output_path, fps=fps, size=(W, H))
                 print(f"[INFO] Video parameters: {W}x{H} @ {fps:.2f}fps")
+            # per-frame visual smoothing params (shared)
+            kmh_rate = cfg.smooth.speed_max_kmh_rate
+            quantum = cfg.smooth.speed_quantum_kmh
+            delta_max = kmh_rate * dt
 
             # --- Deduplicate per class (except "other") ---
             kept, class_conf = deduplicate_by_class(frame_det.boxes, names, "other")
@@ -158,18 +177,47 @@ def main():
                 cv2.putText(frame, f"PRED {pred_s.lat:.6f}, {pred_s.lon:.6f}", (20, y0),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2, cv2.LINE_AA)
                 y0 += 30
-                cv2.putText(frame, f"SPD  {spd_mps:5.1f} m/s  ({spd_kmh:5.1f} km/h)", (20, y0),
+                # Visual rate limiting + quantization for smoother perception
+                target_kmh = float(spd_kmh)
+                dv = max(min(target_kmh - vis_spd_kmh, delta_max), -delta_max)
+                vis_spd_kmh = vis_spd_kmh + dv
+                vis_spd_kmh_draw = round(vis_spd_kmh / quantum) * quantum if quantum > 0 else vis_spd_kmh
+                cv2.putText(frame, f"SPD  {vis_spd_kmh_draw:5.1f} km/h", (20, y0),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2, cv2.LINE_AA)
                 y0 += 30
 
             if frame_idx < len(srt) and pred_s is not None:
                 gt_lat = srt[frame_idx]["lat"]; gt_lon = srt[frame_idx]["lon"]
                 err_m = haversine_m(pred_s.lat, pred_s.lon, gt_lat, gt_lon)
+                # compute ground-truth speed from SRT (m/s)
+                if frame_idx > 0:
+                    prev_gt_lat = srt[frame_idx-1]["lat"]; prev_gt_lon = srt[frame_idx-1]["lon"]
+                    d_gt = haversine_m(prev_gt_lat, prev_gt_lon, gt_lat, gt_lon)
+                    # Prefer per-frame dt_ms if available
+                    if "dt_ms" in srt[frame_idx]:
+                        dt_gt = max(srt[frame_idx]["dt_ms"], 1e-3) / 1000.0
+                    else:
+                        dt_gt = dt
+                    spd_gt_mps = d_gt / dt_gt if dt_gt > 0 else 0.0
+                    # Smooth SRT speed to reduce flicker
+                    a = cfg.smooth.speed_alpha
+                    spd_gt_state = (1 - a) * spd_gt_state + a * spd_gt_mps
+                else:
+                    spd_gt_mps = 0.0
+                    spd_gt_state = (1 - cfg.smooth.speed_alpha) * spd_gt_state
                 cv2.putText(frame, f"SRT  {gt_lat:.6f}, {gt_lon:.6f}", (20, y0),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2, cv2.LINE_AA)
                 y0 += 30
                 cv2.putText(frame, f"ERR  {err_m:6.1f} m", (20, y0),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,200,255), 2, cv2.LINE_AA)
+                y0 += 30
+                # Slew + quantize SRT speed for visual stability
+                target_gt_kmh = float(spd_gt_state * 3.6)
+                dv_gt = max(min(target_gt_kmh - vis_spd_gt_kmh, delta_max), -delta_max)
+                vis_spd_gt_kmh = vis_spd_gt_kmh + dv_gt
+                vis_spd_gt_kmh_draw = round(vis_spd_gt_kmh / quantum) * quantum if quantum > 0 else vis_spd_gt_kmh
+                cv2.putText(frame, f"SPD_GT {vis_spd_gt_kmh_draw:5.1f} km/h", (20, y0),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150,200,255), 2, cv2.LINE_AA)
 
             # --- Camera center reticle ---
             ch, cw = frame.shape[:2]
@@ -202,6 +250,10 @@ def main():
 
             frame_idx += 1
 
+    except Exception as e:
+        print("[ERROR] Unhandled exception in main loop:", e)
+        traceback.print_exc()
+        raise
     finally:
         if wtr is not None:
             wtr.close()

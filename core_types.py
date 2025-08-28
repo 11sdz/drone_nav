@@ -35,3 +35,13 @@ class ITileProvider(Protocol):
 
 class IHUDRenderer(Protocol):
     def render(self, center: LatLon, path: List[LatLon], nodes: List[Tuple[str, LatLon]]) -> np.ndarray: ...
+
+# Strategy protocols for SOLID/OOP pluggability
+class IPositionPredictor(Protocol):
+    def predict(self, class_weights: List[float], class_locs: List[LatLon]) -> Optional[LatLon]: ...
+
+class IPositionSmoother(Protocol):
+    def update(self, position: Optional[LatLon], dt: float) -> Optional[LatLon]: ...
+
+class ISpeedEstimator(Protocol):
+    def update(self, position: Optional[LatLon], dt: float) -> Tuple[float, float]: ...
