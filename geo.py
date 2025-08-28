@@ -23,6 +23,13 @@ def xy_m_to_latlon(x: float, y: float, lat0: float, lon0: float):
     lon = lon0 + x / m_per_deg_lon
     return lat, lon
 
+def offset_latlon_by_m(lat: float, lon: float, north_m: float, east_m: float):
+    m_per_deg_lat = 110_540.0
+    m_per_deg_lon = 111_320.0 * math.cos(math.radians(lat))
+    dlat = north_m / m_per_deg_lat
+    dlon = east_m / m_per_deg_lon
+    return lat + dlat, lon + dlon
+
 # Web-mercator <-> global pixels
 def latlon_to_global_px(lat: float, lon: float, z: int, tile_size: int):
     siny = math.sin(math.radians(lat))

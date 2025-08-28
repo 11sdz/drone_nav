@@ -52,6 +52,11 @@ class AlgoCfg:
     speed: str = "displacement"  # base method; speed is additionally smoothed via SmoothCfg.speed_alpha
 
 @dataclass(frozen=True)
+class CameraCfg:
+    pitch_deg: float = 50.0  # gimbal down angle from horizontal (40-60 typical)
+    heading_deg: float = 0.0 # north-locked
+
+@dataclass(frozen=True)
 class AppCfg:
     model: ModelCfg = ModelCfg()
     video: VideoCfg = VideoCfg()
@@ -60,3 +65,4 @@ class AppCfg:
     stability: StabilityCfg = StabilityCfg()
     smooth: SmoothCfg = SmoothCfg()
     algo: AlgoCfg = AlgoCfg()
+    camera: CameraCfg = CameraCfg()

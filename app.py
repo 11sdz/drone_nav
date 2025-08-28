@@ -12,7 +12,7 @@ from stability import StabilityGate
 from estimator import PositionEstimator, WeightedBarycenterPredictor, EmaPositionSmoother, DisplacementSpeedEstimator, KalmanCvSmoother
 from dedup import deduplicate_by_class
 from video_io import Cv2VideoWriter
-from geo import haversine_m
+from geo import haversine_m, offset_latlon_by_m
 import traceback
 
 def overlay_bottom_right(frame, overlay_img, pad=12):
@@ -236,7 +236,26 @@ def main():
                     d = haversine_m(pred_s.lat, pred_s.lon, ll.lat, ll.lon)
                     if d <= cfg.hud.building_radius_m:
                         nearby.append((name, ll))
-                hud_img = hud.render(pred_s, path_pred, nearby)
+                # Camera offset correction: predicted point is center-ray ground point; camera is south of it by d_center
+                # Use altitude from SRT when available
+                d_center_m = None
+                if frame_idx < len(srt):
+                    alt = srt[frame_idx].get("alt")
+                    if isinstance(alt, (int, float)) and alt > 0:
+                        import math
+                        theta = math.radians(max(1.0, min(89.0, cfg.camera.pitch_deg)))
+                        d_center_m = alt / math.tan(theta)
+                if d_center_m is not None:
+                    cam_lat, cam_lon = offset_latlon_by_m(pred_s.lat, pred_s.lon, north_m=-d_center_m, east_m=0.0)
+                    cam_pred = LatLon(cam_lat, cam_lon)
+                else:
+                    cam_pred = pred_s
+
+                actual = None
+                if frame_idx < len(srt):
+                    actual = LatLon(srt[frame_idx]["lat"], srt[frame_idx]["lon"])
+                # Center HUD on camera-predicted location for better parallax representation
+                hud_img = hud.render(cam_pred, path_pred, nearby, actual=actual)
                 frame = overlay_bottom_right(frame, hud_img, pad=12)
 
             # --- IO ---

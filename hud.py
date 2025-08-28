@@ -2,7 +2,7 @@ from typing import List, Tuple
 import numpy as np
 import cv2
 from core_types import IHUDRenderer, LatLon
-from geo import latlon_to_global_px, global_px_to_tile_xy
+from geo import latlon_to_global_px, global_px_to_tile_xy, haversine_m, latlon_to_xy_m
 
 class HudRenderer(IHUDRenderer):
     def __init__(self, tile_provider, tile_size: int, hud_size: int, zoom: int):
@@ -50,7 +50,7 @@ class HudRenderer(IHUDRenderer):
         v = int(self.hud_size // 2 + (py - cy))
         return u, v
 
-    def render(self, center: LatLon, path: List[LatLon], nodes: List[Tuple[str, LatLon]]) -> np.ndarray:
+    def render(self, center: LatLon, path: List[LatLon], nodes: List[Tuple[str, LatLon]], actual: LatLon = None) -> np.ndarray:
         hud, center_global_px = self._build_canvas(center)
 
         # path polyline
@@ -67,5 +67,44 @@ class HudRenderer(IHUDRenderer):
             if 0 <= u < self.hud_size and 0 <= v < self.hud_size:
                 cv2.circle(hud, (u, v), 4, (255,255,255), -1)
                 cv2.putText(hud, name, (u+5, v-5), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1, cv2.LINE_AA)
+
+        # camera vs barycenter triangle/vector
+        if len(path) >= 1:
+            up, vp = self._project(path[-1], center_global_px)  # barycenter-based predicted ground point
+            uc, vc = self._project(center, center_global_px)    # camera-estimated position (HUD center)
+            # hypotenuse (magenta)
+            cv2.line(hud, (up, vp), (uc, vc), (255, 0, 255), 2)
+            # legs (thin magenta)
+            cv2.line(hud, (up, vp), (uc, vp), (255, 0, 255), 1)
+            cv2.line(hud, (uc, vp), (uc, vc), (255, 0, 255), 1)
+            # labels: components and total distance in meters
+            dx_m, dy_m = latlon_to_xy_m(path[-1].lat, path[-1].lon, center.lat, center.lon)
+            err_hyp = int(round((dx_m**2 + dy_m**2) ** 0.5))
+            midx, midy = (up + uc) // 2, (vp + vc) // 2
+            cv2.putText(hud, f"dE {dx_m:+.0f} m", (min(up, uc) + 4, vp - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,0,255), 1, cv2.LINE_AA)
+            cv2.putText(hud, f"dN {dy_m:+.0f} m", (uc + 4, min(vp, vc) + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,0,255), 1, cv2.LINE_AA)
+            cv2.putText(hud, f"|d| {err_hyp} m", (midx + 6, midy - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255,0,255), 1, cv2.LINE_AA)
+            # camera marker
+            cv2.circle(hud, (uc, vc), 5, (255, 0, 255), -1)
+            cv2.putText(hud, "CAM", (uc + 6, vc - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255,0,255), 1, cv2.LINE_AA)
+
+        # actual drone location marker (from SRT) + error vector
+        if actual is not None:
+            ua, va = self._project(actual, center_global_px)
+            if 0 <= ua < self.hud_size and 0 <= va < self.hud_size:
+                # predicted position on HUD: last path point if available, else center
+                if len(path) >= 1:
+                    up, vp = self._project(path[-1], center_global_px)
+                else:
+                    up, vp = self.hud_size // 2, self.hud_size // 2
+                # error vector line
+                cv2.line(hud, (up, vp), (ua, va), (0, 200, 255), 2)
+                # actual marker
+                cv2.circle(hud, (ua, va), 5, (0, 200, 255), -1)
+                cv2.circle(hud, (ua, va), 9, (0, 200, 255), 2)
+                cv2.putText(hud, "DRONE", (ua+6, va-6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0,200,255), 1, cv2.LINE_AA)
+                # numeric distance in meters
+                err_m = haversine_m(center.lat, center.lon, actual.lat, actual.lon)
+                cv2.putText(hud, f"ERR {err_m:4.0f} m", (8, self.hud_size - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,200,255), 2, cv2.LINE_AA)
 
         return hud
