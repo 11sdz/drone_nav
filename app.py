@@ -11,7 +11,7 @@ from detector.yolo_ultra import YoloUltranyxDetector
 from stability import StabilityGate
 from estimator import PositionEstimator
 from dedup import deduplicate_by_class
-from video_io import Cv2VideoReader, Cv2VideoWriter
+from video_io import Cv2VideoWriter
 from geo import haversine_m
 
 def overlay_bottom_right(frame, overlay_img, pad=12):
@@ -21,6 +21,25 @@ def overlay_bottom_right(frame, overlay_img, pad=12):
     y1 = H - h - pad
     frame[y1:y1+h, x1:x1+w] = overlay_img
     return frame
+
+def _get_screen_resolution():
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        return int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))
+    except Exception:
+        return 1920, 1080
+
+def _resize_for_screen(img, margin_w=80, margin_h=120):
+    sw, sh = _get_screen_resolution()
+    h, w = img.shape[:2]
+    max_w = max(sw - margin_w, 1)
+    max_h = max(sh - margin_h, 1)
+    scale = min(max_w / w, max_h / h, 1.0)
+    if scale < 1.0:
+        new_size = (int(w * scale), int(h * scale))
+        return cv2.resize(img, new_size, interpolation=cv2.INTER_AREA)
+    return img
 
 def main():
     cfg = AppCfg()
@@ -38,6 +57,14 @@ def main():
         raise RuntimeError(f"No SRT entries parsed from {cfg.data.srt_path}")
     print(f"[INFO] Loaded {len(srt)} SRT frames")
     lat0, lon0 = srt[0]["lat"], srt[0]["lon"]
+    # derive dt/fps from SRT DiffTime when available to avoid double-reading video
+    dt_ms_vals = [e.get("dt_ms") for e in srt[:120] if isinstance(e.get("dt_ms"), (int, float))]
+    if dt_ms_vals:
+        avg_dt_ms = sum(dt_ms_vals) / len(dt_ms_vals)
+        fps = 1000.0 / max(avg_dt_ms, 1e-3)
+    else:
+        fps = 30.0
+    dt = 1.0 / float(fps)
 
     # --- Detector ---
     det = YoloUltranyxDetector(cfg.model)
@@ -62,12 +89,10 @@ def main():
     )
     est = PositionEstimator(lat0, lon0, pos_alpha=cfg.smooth.pos_alpha)
 
-    # --- Video IO ---
-    rdr = Cv2VideoReader()
-    W, H, fps = rdr.open(cfg.video.input_path)
-    dt = 1.0 / float(fps)
-    wtr = Cv2VideoWriter(cfg.video.output_path, fps=fps, size=(W, H))
-    print(f"[INFO] Video parameters: {W}x{H} @ {fps:.2f}fps")
+    # --- Video Output (initialized on first frame to avoid double-reading for size) ---
+    wtr = None
+    W = H = None  # determined from first frame
+    print(f"[INFO] Target FPS (from SRT): {fps:.2f}")
 
     path_pred: List[LatLon] = []
     frame_idx = 0
@@ -77,15 +102,23 @@ def main():
             frame = frame_det.frame_bgr
             names = frame_det.names
 
+            # lazily initialize writer with first frame size
+            if wtr is None:
+                H, W = frame.shape[:2]
+                wtr = Cv2VideoWriter(cfg.video.output_path, fps=fps, size=(W, H))
+                print(f"[INFO] Video parameters: {W}x{H} @ {fps:.2f}fps")
+
             # --- Deduplicate per class (except "other") ---
             kept, class_conf = deduplicate_by_class(frame_det.boxes, names, "other")
+            # filter out 'other' from stability, drawing, and estimation
+            class_conf = {k: v for k, v in class_conf.items() if k != "other"}
 
             # --- Stability update & hysteresis ---
-            presence_now = {names[b.cls_id]: 1 for b in kept}
+            presence_now = {names[b.cls_id]: 1 for b in kept if names[b.cls_id] != "other"}
             score = gate.update(presence_now, class_conf)
 
             # Keep only locked classes
-            kept_locked: List[BoxDet] = [b for b in kept if gate.is_locked(names[b.cls_id])]
+            kept_locked: List[BoxDet] = [b for b in kept if names[b.cls_id] != "other" and gate.is_locked(names[b.cls_id])]
 
             # --- Draw Ultralytics style overlays (minimal, no blur tricks) ---
             # Avoid rescaling; draw directly on `frame`.
@@ -97,7 +130,6 @@ def main():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 255), 2, cv2.LINE_AA)
 
             # --- Class center dots + label GPS ---
-            areas = []
             class_weights = []
             class_locs = []
             for b in kept_locked:
@@ -160,17 +192,19 @@ def main():
                 frame = overlay_bottom_right(frame, hud_img, pad=12)
 
             # --- IO ---
-            wtr.write(frame)
+            if wtr is not None:
+                wtr.write(frame)
             if cfg.video.preview:
-                cv2.imshow("YOLO + HUD + Stability + Speed", frame)
+                disp = _resize_for_screen(frame)
+                cv2.imshow("YOLO + HUD + Stability + Speed", disp)
                 if cv2.waitKey(1) & 0xFF == 27:
                     break
 
             frame_idx += 1
 
     finally:
-        rdr.close()
-        wtr.close()
+        if wtr is not None:
+            wtr.close()
         if cfg.video.preview:
             cv2.destroyAllWindows()
         print(f"[DONE] Saved: {cfg.video.output_path}")

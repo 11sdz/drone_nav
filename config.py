@@ -35,8 +35,8 @@ class StabilityCfg:
     presence_gamma: float = 1.5
     conf_alpha: float = 0.7
     ema_beta: float = 0.3
-    lock_thresh: float = 0.70
-    unlock_thresh: float = 0.55
+    lock_thresh: float = 0.65
+    unlock_thresh: float = 0.6
 
 @dataclass(frozen=True)
 class SmoothCfg:
