@@ -10,6 +10,8 @@ from hud import HudRenderer
 from detector.yolo_ultra import YoloUltranyxDetector
 from stability import StabilityGate
 from estimator import PositionEstimator, WeightedBarycenterPredictor, EmaPositionSmoother, DisplacementSpeedEstimator, KalmanCvSmoother
+from robust_predictor import RobustPositionPredictor, RobustPredictorConfig
+from robust_speed_estimator import RobustSpeedEstimator, RobustSpeedConfig
 from dedup import deduplicate_by_class
 from video_io import Cv2VideoWriter
 from geo import haversine_m, offset_latlon_by_m
@@ -88,17 +90,59 @@ def main():
         lock_thresh=cfg.stability.lock_thresh,
         unlock_thresh=cfg.stability.unlock_thresh,
     )
-    # --- Estimator (Strategy-based) ---
-    predictor = WeightedBarycenterPredictor(lat0, lon0)
+    # --- Estimator (Strategy-based with modular algorithms) ---
+    # Create predictor based on config
+    if cfg.algo.predictor == "robust":
+        predictor_config = RobustPredictorConfig(
+            yolo_confidence_threshold=cfg.robust.yolo_confidence_threshold,
+            yolo_stability_threshold=cfg.robust.yolo_stability_threshold,
+            flow_confidence_threshold=cfg.robust.flow_confidence_threshold,
+            flow_stability_threshold=cfg.robust.flow_stability_threshold,
+            flow_primary_weight=cfg.robust.flow_primary_weight,
+            max_jump_distance_m=cfg.robust.max_jump_distance_m,
+            min_detection_confidence=cfg.robust.min_detection_confidence,
+            outlier_rejection_enabled=cfg.robust.outlier_rejection_enabled,
+            history_length=cfg.robust.history_length,
+            position_alpha=cfg.robust.position_alpha,
+            velocity_alpha=cfg.robust.velocity_alpha,
+            min_yolo_detections=cfg.robust.min_yolo_detections,
+            flow_fallback_enabled=cfg.robust.flow_fallback_enabled,
+            hybrid_mode_enabled=cfg.robust.hybrid_mode_enabled
+        )
+        predictor = RobustPositionPredictor(lat0, lon0, predictor_config)
+        print("[INFO] Predictor: Robust (YOLO + Optical Flow)")
+    else:
+        predictor = WeightedBarycenterPredictor(lat0, lon0)
+        print("[INFO] Predictor: Weighted Barycenter")
+    
+    # Create smoother based on config
     if cfg.algo.smoother == "kalman":
         smoother = KalmanCvSmoother(lat0, lon0)
-        # when using Kalman, speed can be derived from the filter's velocity later; keep displacement but smooth it
-        speed_est = DisplacementSpeedEstimator(speed_alpha=cfg.smooth.speed_alpha)
         print("[INFO] Smoother: Kalman (CV)")
     else:
         smoother = EmaPositionSmoother(alpha=cfg.smooth.pos_alpha)
-        speed_est = DisplacementSpeedEstimator(speed_alpha=cfg.smooth.speed_alpha)
         print("[INFO] Smoother: EMA")
+    
+    # Create speed estimator based on config
+    if cfg.algo.speed == "robust" and cfg.algo.predictor == "robust":
+        # Use robust speed estimator with flow detector from predictor
+        speed_config = RobustSpeedConfig(
+            position_alpha=cfg.robust.position_alpha,
+            flow_alpha=cfg.robust.velocity_alpha,
+            flow_weight=cfg.robust.flow_primary_weight,
+            max_speed_kmh=100.0,
+            min_speed_kmh=0.1,
+            speed_smoothing_alpha=cfg.smooth.speed_alpha,
+            history_length=cfg.robust.history_length,
+            outlier_rejection_enabled=cfg.robust.outlier_rejection_enabled,
+            max_speed_change_ratio=0.5
+        )
+        speed_est = RobustSpeedEstimator(speed_config, predictor.flow_detector)
+        print("[INFO] Speed Estimator: Robust (Position + Flow)")
+    else:
+        speed_est = DisplacementSpeedEstimator(speed_alpha=cfg.smooth.speed_alpha)
+        print("[INFO] Speed Estimator: Displacement")
+    
     est = PositionEstimator(predictor, smoother, speed_est)
 
     # --- Video Output (initialized on first frame to avoid double-reading for size) ---
@@ -166,8 +210,14 @@ def main():
                     class_weights.append(w)
                     class_locs.append(ll)
 
+            # --- Update optical flow if enabled ---
+            if cfg.flow.enabled and frame_idx < len(srt):
+                alt = srt[frame_idx].get("alt")
+                if isinstance(alt, (int, float)) and alt > 0:
+                    est.update_flow(frame, dt, float(alt), cfg.camera.fov_x_deg, cfg.camera.fov_y_deg)
+            
             # --- Estimate position & speed ---
-            pred_s, spd_mps, spd_kmh = est.estimate(class_weights, class_locs, dt)
+            pred_s, _, spd_kmh = est.estimate(class_weights, class_locs, dt)
             if pred_s is not None:
                 path_pred.append(pred_s)
 
@@ -218,6 +268,38 @@ def main():
                 vis_spd_gt_kmh_draw = round(vis_spd_gt_kmh / quantum) * quantum if quantum > 0 else vis_spd_gt_kmh
                 cv2.putText(frame, f"SPD_GT {vis_spd_gt_kmh_draw:5.1f} km/h", (20, y0),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150,200,255), 2, cv2.LINE_AA)
+                y0 += 30
+                
+                # Enhanced system information display
+                if cfg.algo.predictor == "robust":
+                    # Show current prediction mode
+                    mode = est.get_current_mode()
+                    if mode == "yolo":
+                        mode_color = (0, 255, 0)
+                    elif mode == "flow":
+                        mode_color = (0, 255, 255)
+                    else:
+                        mode_color = (255, 255, 0)
+                    cv2.putText(frame, f"MODE: {mode.upper()}", (20, y0),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, mode_color, 2, cv2.LINE_AA)
+                    y0 += 25
+                    
+                    # Show flow information if available
+                    if cfg.flow.enabled:
+                        flow_speed = est.get_flow_speed_kmh()
+                        flow_heading = est.get_flow_heading_deg()
+                        flow_stable = est.is_flow_stable()
+                        
+                        if flow_speed > 0.1:
+                            flow_color = (0, 255, 255) if flow_stable else (0, 200, 200)
+                            cv2.putText(frame, f"FLOW: {flow_speed:.1f} km/h {flow_heading:.0f}° {'STABLE' if flow_stable else 'UNSTABLE'}", 
+                                       (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, flow_color, 2, cv2.LINE_AA)
+                            y0 += 25
+                    
+                    # Show detection count and confidence
+                    cv2.putText(frame, f"DETECTIONS: {len(class_weights)}", (20, y0),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+                    y0 += 25
 
             # --- Camera center reticle ---
             ch, cw = frame.shape[:2]

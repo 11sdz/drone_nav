@@ -47,14 +47,56 @@ class SmoothCfg:
 
 @dataclass(frozen=True)
 class AlgoCfg:
-    predictor: str = "weighted_barycenter"  # future: particle_filter, kalman, etc.
-    smoother: str = "kalman"
-    speed: str = "displacement"  # base method; speed is additionally smoothed via SmoothCfg.speed_alpha
+    predictor: str = "robust"  # "weighted_barycenter", "robust"
+    smoother: str = "kalman"  # "ema", "kalman"
+    speed: str = "robust"  # "displacement", "robust"
 
 @dataclass(frozen=True)
 class CameraCfg:
     pitch_deg: float = 50.0  # gimbal down angle from horizontal (40-60 typical)
     heading_deg: float = 0.0 # north-locked
+    fov_x_deg: float = 70.0  # horizontal field of view
+    fov_y_deg: float = 45.0  # vertical field of view
+
+@dataclass(frozen=True)
+class FlowCfg:
+    enabled: bool = True
+    max_features: int = 500
+    quality_level: float = 0.01
+    min_distance: int = 10
+    confidence_threshold: float = 0.4
+    stability_threshold: float = 0.5
+    history_length: int = 10
+    velocity_alpha: float = 0.3
+    acceleration_alpha: float = 0.2
+    north_constraint_enabled: bool = True
+    max_lateral_ratio: float = 0.3
+
+@dataclass(frozen=True)
+class RobustCfg:
+    # YOLO settings
+    yolo_confidence_threshold: float = 0.6
+    yolo_stability_threshold: float = 0.7
+    min_yolo_detections: int = 1
+    
+    # Flow settings
+    flow_confidence_threshold: float = 0.4
+    flow_stability_threshold: float = 0.5
+    flow_primary_weight: float = 0.8
+    
+    # Noise filtering
+    max_jump_distance_m: float = 100.0
+    min_detection_confidence: float = 0.3
+    outlier_rejection_enabled: bool = True
+    
+    # History and smoothing
+    history_length: int = 10
+    position_alpha: float = 0.3
+    velocity_alpha: float = 0.2
+    
+    # Switching logic
+    flow_fallback_enabled: bool = True
+    hybrid_mode_enabled: bool = True
 
 @dataclass(frozen=True)
 class AppCfg:
@@ -66,3 +108,5 @@ class AppCfg:
     smooth: SmoothCfg = SmoothCfg()
     algo: AlgoCfg = AlgoCfg()
     camera: CameraCfg = CameraCfg()
+    flow: FlowCfg = FlowCfg()
+    robust: RobustCfg = RobustCfg()

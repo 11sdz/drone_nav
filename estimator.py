@@ -2,6 +2,8 @@ from typing import List, Tuple, Optional
 import numpy as np
 from geo import latlon_to_xy_m, xy_m_to_latlon, haversine_m
 from core_types import LatLon, IPositionPredictor, IPositionSmoother, ISpeedEstimator
+from robust_predictor import RobustPositionPredictor, RobustPredictorConfig
+from robust_speed_estimator import RobustSpeedEstimator, RobustSpeedConfig
 
 
 class WeightedBarycenterPredictor(IPositionPredictor):
@@ -77,6 +79,41 @@ class PositionEstimator:
         smoothed = self.smoother.update(pred, dt)
         spd_mps, spd_kmh = self.speed.update(smoothed, dt)
         return smoothed, spd_mps, spd_kmh
+    
+    def update_flow(self, frame, dt: float, altitude: float, fov_x_deg: float, fov_y_deg: float):
+        """Update optical flow if predictor supports it"""
+        if hasattr(self.predictor, 'update_flow'):
+            self.predictor.update_flow(frame, dt, altitude, fov_x_deg, fov_y_deg)
+    
+    def get_current_mode(self) -> str:
+        """Get current prediction mode if supported"""
+        if hasattr(self.predictor, 'get_current_mode'):
+            return self.predictor.get_current_mode()
+        return "unknown"
+    
+    def get_flow_velocity(self) -> Tuple[float, float]:
+        """Get flow velocity if available"""
+        if hasattr(self.predictor, 'get_flow_velocity'):
+            return self.predictor.get_flow_velocity()
+        return (0.0, 0.0)
+    
+    def get_flow_speed_kmh(self) -> float:
+        """Get flow speed if available"""
+        if hasattr(self.predictor, 'get_flow_speed_kmh'):
+            return self.predictor.get_flow_speed_kmh()
+        return 0.0
+    
+    def get_flow_heading_deg(self) -> float:
+        """Get flow heading if available"""
+        if hasattr(self.predictor, 'get_flow_heading_deg'):
+            return self.predictor.get_flow_heading_deg()
+        return 0.0
+    
+    def is_flow_stable(self) -> bool:
+        """Check if flow is stable if available"""
+        if hasattr(self.predictor, 'is_flow_stable'):
+            return self.predictor.is_flow_stable()
+        return False
 
 
 class KalmanCvSmoother(IPositionSmoother):
