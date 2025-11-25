@@ -1,5 +1,8 @@
 import cv2
 import pandas as pd
+import numpy as np
+import csv
+import os
 from collections import defaultdict
 from typing import List, Tuple
 from config import AppCfg
@@ -14,7 +17,7 @@ from robust_predictor import RobustPositionPredictor, RobustPredictorConfig
 from robust_speed_estimator import RobustSpeedEstimator, RobustSpeedConfig
 from dedup import deduplicate_by_class
 from video_io import Cv2VideoWriter
-from geo import haversine_m, offset_latlon_by_m
+from geo import haversine_m, offset_latlon_by_m, latlon_to_xy_m
 import traceback
 
 def overlay_bottom_right(frame, overlay_img, pad=12):
@@ -68,6 +71,53 @@ def main():
     else:
         fps = 30.0
     dt = 1.0 / float(fps)
+
+    def _export_results(records: List[dict], pred_traj: List[Tuple[float, float]],
+                        srt_traj: List[Tuple[float, float]]):
+        if not cfg.export_results or not records:
+            return
+        os.makedirs(cfg.results_dir, exist_ok=True)
+        csv_path = os.path.join(cfg.results_dir, "prediction_accuracy.csv")
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(records[0].keys()))
+            writer.writeheader()
+            writer.writerows(records)
+        errors = np.array([r["error_m"] for r in records], dtype=float)
+        if errors.size:
+            print(f"[RESULTS] Saved accuracy CSV to {csv_path}")
+            print(f"[RESULTS] Mean error {errors.mean():.2f} m | Median {np.median(errors):.2f} m "
+                  f"| Min {errors.min():.2f} m | Max {errors.max():.2f} m | Std {errors.std():.2f} m")
+        try:
+            import matplotlib.pyplot as plt
+            # Trajectory comparison
+            if pred_traj and srt_traj:
+                plt.figure(figsize=(8, 6))
+                if pred_traj:
+                    px, py = zip(*pred_traj)
+                    plt.plot(px, py, label="Prediction", color="tab:green")
+                if srt_traj:
+                    sx, sy = zip(*srt_traj)
+                    plt.plot(sx, sy, label="SRT", color="tab:orange")
+                plt.title("Trajectory Comparison (local meters)")
+                plt.xlabel("East (m)")
+                plt.ylabel("North (m)")
+                plt.legend()
+                traj_path = os.path.join(cfg.results_dir, "trajectory_comparison.png")
+                plt.savefig(traj_path, dpi=150, bbox_inches="tight")
+                plt.close()
+                print(f"[RESULTS] Saved trajectory plot to {traj_path}")
+            # Error over time
+            plt.figure(figsize=(8, 4))
+            plt.plot([r["frame"] for r in records], errors, color="tab:red")
+            plt.title("Prediction Error vs Frame")
+            plt.xlabel("Frame")
+            plt.ylabel("Error (m)")
+            err_path = os.path.join(cfg.results_dir, "error_over_time.png")
+            plt.savefig(err_path, dpi=150, bbox_inches="tight")
+            plt.close()
+            print(f"[RESULTS] Saved error plot to {err_path}")
+        except Exception as e:
+            print(f"[WARN] Failed to generate plots: {e}")
 
     # --- Detector ---
     det = YoloUltranyxDetector(cfg.model)
@@ -155,6 +205,9 @@ def main():
     vis_spd_kmh = 0.0   # visualized algo speed (km/h) after slew + quantize
     vis_spd_gt_kmh = 0.0  # visualized SRT speed (km/h) after slew + quantize
     frame_idx = 0
+    accuracy_records: List[dict] = []
+    traj_pred_xy: List[Tuple[float, float]] = []
+    traj_srt_xy: List[Tuple[float, float]] = []
 
     try:
         for frame_det in det.stream(cfg.video.input_path):
@@ -239,6 +292,21 @@ def main():
             if frame_idx < len(srt) and pred_s is not None:
                 gt_lat = srt[frame_idx]["lat"]; gt_lon = srt[frame_idx]["lon"]
                 err_m = haversine_m(pred_s.lat, pred_s.lon, gt_lat, gt_lon)
+                
+                if cfg.export_results:
+                    accuracy_records.append({
+                        "frame": frame_idx,
+                        "pred_lat": pred_s.lat,
+                        "pred_lon": pred_s.lon,
+                        "gt_lat": gt_lat,
+                        "gt_lon": gt_lon,
+                        "error_m": err_m,
+                        "speed_kmh": float(spd_kmh)
+                    })
+                    pred_xy = latlon_to_xy_m(pred_s.lat, pred_s.lon, lat0, lon0)
+                    gt_xy = latlon_to_xy_m(gt_lat, gt_lon, lat0, lon0)
+                    traj_pred_xy.append(pred_xy)
+                    traj_srt_xy.append(gt_xy)
                 # compute ground-truth speed from SRT (m/s)
                 if frame_idx > 0:
                     prev_gt_lat = srt[frame_idx-1]["lat"]; prev_gt_lon = srt[frame_idx-1]["lon"]
@@ -361,6 +429,8 @@ def main():
         if cfg.video.preview:
             cv2.destroyAllWindows()
         print(f"[DONE] Saved: {cfg.video.output_path}")
+        if accuracy_records:
+            _export_results(accuracy_records, traj_pred_xy, traj_srt_xy)
 
 if __name__ == "__main__":
     main()

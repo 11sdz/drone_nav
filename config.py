@@ -110,3 +110,5 @@ class AppCfg:
     camera: CameraCfg = CameraCfg()
     flow: FlowCfg = FlowCfg()
     robust: RobustCfg = RobustCfg()
+    export_results: bool = True
+    results_dir: str = "output/results"
